@@ -35,6 +35,9 @@ functionality to RMG.
 
 import logging
 import os.path
+import numpy as np
+import mpmath as mp
+import scipy.optimize as opt
 
 import rmgpy.pdep.network
 import rmgpy.reaction
@@ -317,6 +320,177 @@ class PDepNetwork(rmgpy.pdep.network.Network):
         if not found:
             self.pathReactions.append(newReaction)
             self.invalidate()
+
+    def get_energy_filtered_reactions(self,a,T):
+        """
+        Returns a list of products and isomers that are greater in Free Energy
+        than a*R*T + Gfsource(T)
+        """
+        R = 8.314
+        dE = a*R*T
+        Gsource = sum([item.getFreeEnergy(T) for item in self.source])
+        filtered_rxns = []
+        for rxn in self.pathReactions:
+            E0 = rxn.transitionState.conformer.E0.value_si
+            if E0-Gsource > dE:
+                filtered_rxns.append(rxn)
+                
+        return filtered_rxns
+
+    def get_rate_filtered_reactions(self,T,P,tol):
+        """
+        determines the set of pathReactions that have fluxes less than
+        tol at steady state where all A => B + C reactions are irreversible
+        and there is a constant flux from/to the source configuration of 1.0
+        """
+        c = self.solve_SS_network(T,P)
+        isomerSpcs = [iso.species[0] for iso in self.isomers]
+        filtered_rxns = []
+        for rxn in self.pathReactions:
+            val = 0.0
+            val2 = 0.0
+            if rxn.reactants[0] in isomerSpcs:
+                ind = isomerSpcs.index(rxn.reactants[0])
+                kf = rxn.getRateCoefficient(T,P)
+                val = kf*c[ind]
+            if rxn.products[0] in isomerSpcs:
+                ind2 = isomerSpcs.index(rxn.products[0])
+                kr = rxn.getRateCoefficient(T,P)/rxn.getEquilibriumConstant(T)
+                val2 = kr*c[ind2]
+    
+            if max(val,val2) < tol:
+                filtered_rxns.append(rxn)
+        
+        return filtered_rxns
+    
+    def solve_SS_network(self,T,P):
+        """
+        calculates the steady state concentrations if all A => B + C
+        reactions are irreversible and the flux from/to the source
+        configuration is 1.0
+        """
+        A = np.zeros((len(self.isomers),len(self.isomers)))
+        b = np.zeros(len(self.isomers))
+        bimolecular = len(self.source) > 1
+        
+        isomerSpcs = [iso.species[0] for iso in self.isomers]
+        
+        for i,rxn in enumerate(self.pathReactions):
+            
+            if rxn.reactants[0] in isomerSpcs:
+                ind = isomerSpcs.index(rxn.reactants[0])
+                kf = rxn.getRateCoefficient(T,P)
+                A[ind,ind] -= kf
+            else:
+                ind = None
+            if rxn.products[0] in isomerSpcs:
+                ind2 = isomerSpcs.index(rxn.products[0])
+                kr = rxn.getRateCoefficient(T,P)/rxn.getEquilibriumConstant(T)
+                A[ind2,ind2] -= kr
+            else:
+                ind2 = None
+            
+            if ind is not None and ind2 is not None:
+                A[ind,ind2] += kr
+                A[ind2,ind] += kf
+            
+            if bimolecular:
+                if rxn.reactants[0].species == self.source:
+                    if not ind:
+                        kf = rxn.getRateCoefficient(T,P)
+                    b[ind2] += kf
+                elif rxn.products[0].species == self.source:
+                    if not ind2:
+                        kr = rxn.getRateCoefficient(T,P)/rxn.getEquilibriumConstant(T)
+                    b[ind] += kr
+        
+        
+        if not bimolecular:
+            ind = isomerSpcs.index(self.source[0])
+            b[ind] = -1.0 #flux at source
+        else:
+            b = -b/b.sum() #1.0 flux from source
+        
+        con = np.linalg.cond(A) #this matrix can be very ill-conditioned so we enhance precision accordingly
+        mp.dps = 30+int(np.log10(con))
+        Amp = mp.matrix(A.tolist())
+        bmp = mp.matrix(b.tolist())
+        
+        c = mp.qr_solve(Amp,bmp)
+        
+        c = np.array(list(c[0]))
+        
+        if any(c<=0.0):
+            c = opt.nnls(A,b)
+            
+        c = c.astype(np.float64)
+        
+        return c
+                
+    
+    def remove_disconnected_reactions(self):
+        """
+        gets rid of reactions/isomers/products not connected to the source by a reaction sequence
+        """
+        keptReactions = []
+        keptProducts = [self.source]
+        incomplete = True
+        while incomplete:
+            s = len(keptReactions)
+            for rxn in self.pathReactions:
+                if not rxn in keptReactions:
+                    if rxn.reactants in keptProducts:
+                        keptProducts.append(rxn.products)
+                        keptReactions.append(rxn)
+                    elif rxn.products in keptProducts:
+                        keptProducts.append(rxn.reactants)
+                        keptReactions.append(rxn)
+                        
+            incomplete = s != len(keptReactions)
+         
+        for rxn in self.pathReactions:
+            if rxn not in keptReactions:
+                self.pathReactions.remove(rxn)
+                
+        for prod in self.products:
+            if prod.species not in keptProducts:
+                self.products.remove(prod)
+            
+        for rct in self.reactants:
+            if rct.species not in keptProducts:
+                self.reactants.remove(react)
+        
+        for iso in self.isomers:
+            if iso.species not in keptProducts:
+                self.isomers.remove(iso)
+        
+        for iso in self.explored:
+            if iso not in keptProducts:
+                self.explored.remove(iso)
+
+    def remove_reactions(self,reactionModel,rxns):
+        """
+        removes a list of reactions from the network and all reactions/products
+        left disconnected by removing those reactions
+        """
+        for rxn in rxns:
+            self.pathReactions.remove(rxn)
+        
+        self.remove_disconnected_reactions()
+        
+        self.invalidate()
+        
+        reactionModel.updateUnimolecularReactionNetworks()
+    
+        path = os.path.join(reactionModel.pressureDependence.outputFile,'pdep')
+        
+        for name in os.listdir(path): #remove the old reduced file
+            if name.endswith('reduced.py'):
+                os.remove(os.path.join(path,name))
+                
+        for name in os.listdir(path): #find the file that has
+            if not name.endswith('full.py'):
+                os.rename(os.path.join(path,name),os.path.join(path,'network_reduced.py'))
 
     def merge(self, other):
         """
