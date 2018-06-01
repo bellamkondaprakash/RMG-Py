@@ -34,6 +34,7 @@ This module contains functionality for parsing CanTherm input files.
 
 import os.path
 import logging
+import numpy as np
 
 from rmgpy import settings
 from rmgpy.exceptions import InputError
@@ -69,6 +70,8 @@ from rmgpy.cantherm.kinetics import KineticsJob
 from rmgpy.cantherm.statmech import StatMechJob, assign_frequency_scale_factor
 from rmgpy.cantherm.thermo import ThermoJob
 from rmgpy.cantherm.pdep import PressureDependenceJob
+from rmgpy.cantherm.explorer import ExplorerJob
+
 
 ################################################################################
 
@@ -384,6 +387,21 @@ def pressureDependence(label,
         rmgmode=rmgmode, sensitivity_conditions=sensitivity_conditions)
     jobList.append(job)
 
+def explorer(source, exploreTolerance=(0.01,'s^-1'), energy_tol=np.inf, flux_tol=0.0):
+    global jobList,speciesDict
+    for job in jobList:
+        if isinstance(job, PressureDependenceJob):
+            pdepjob = job
+            break
+    else:
+        raise InputError('the explorer block must occur after the pressureDependence block')
+    
+    source = [speciesDict[name] for name in source]
+    
+    job = ExplorerJob(source=source,pdepjob=pdepjob,explore_tol=exploreTolerance.value_si,
+                energy_tol=energy_tol,flux_tol=flux_tol)
+    jobList.append(job)
+    
 def SMILES(smiles):
     return Molecule().fromSMILES(smiles)
 
