@@ -28,6 +28,7 @@
 #                                                                             #
 ###############################################################################
 
+import os
 import mpmath as mp
 import numpy as np
 
@@ -36,7 +37,7 @@ from rmgpy.rmg.pdep import PDepNetwork
 from rmgpy.molecule.molecule import Molecule
 
 class ExplorerJob(object):
-    def __init__(self, source, pdepjob, explore_tol, energy_tol, flux_tol):
+    def __init__(self, source, pdepjob, explore_tol, energy_tol, flux_tol, ):
         self.source = source
         self.explore_tol = explore_tol
         self.energy_tol = energy_tol
@@ -71,13 +72,12 @@ class ExplorerJob(object):
                 g.reactive = False
                 bathgases.append(g)
         
-        start_spcs = []
         for spc in bathgases+self.source: #add species to model
             spc,isNew = reactionModel.makeNewSpecies(spc)
             reactionModel.enlarge(spc,reactEdge=False,unimolecularReact=np.ones(len(reactionModel.core.species)),
                       bimolecularReact=np.zeros((len(reactionModel.core.species),len(reactionModel.core.species))))
         
-        #react species
+        #react initial species
         reactionModel.enlarge(reactEdge=True,unimolecularReact=np.ones(len(reactionModel.core.species)),
                       bimolecularReact=np.zeros((len(reactionModel.core.species),len(reactionModel.core.species))))
         
@@ -105,18 +105,52 @@ class ExplorerJob(object):
             
         form = mmol.getFormula()
         
+        #determine T and P combinations
+        
+        if self.pdepjob.Tlist:
+            Tlist = self.pdepjob.Tlist
+        else:
+            Tlist = np.linspace(self.pdepjob.Tmin,self.pdepjob.Tmax,self.pdepjob.Tcount)
+            
+        if self.pdepjob.Plist:
+            Plist = self.pdepjob.Plist
+        else:
+            Plist = np.linspace(self.pdepjob.Pmin,self.pdepjob.Pmax,self.pdepjob.Pcount)
+            
         #generate the network
         
-        while network.getLeakCoefficient(T=T,P=P) > tol:
-            spc = network.getMaximumLeakSpecies(T=T,P=P)
-            flags = np.array([s.molecule[0].getFormula()==form for s in reactionModel.core.species])
-            reactionModel.enlarge((network,spc),reactEdge=False,unimolecularReact=flags,
-                              bimolecularReact=np.zeros((len(reactionModel.core.species),len(reactionModel.core.species))))
+        explore_tol = self.explore_tol
         
-            flags = np.array([s.molecule[0].getFormula()==form for s in reactionModel.core.species])
-            reactionModel.enlarge(reactEdge=True,unimolecularReact=flags,
-                              bimolecularReact=np.zeros((len(reactionModel.core.species),len(reactionModel.core.species))))
-                
+        incomplete = True
+        
+        while incomplete:
+            incomplete = False
+            for T in Tlist:
+                for P in Plist:
+                    if network.getLeakCoefficient(T=T,P=P) > explore_tol:
+                        spc = network.getMaximumLeakSpecies(T=T,P=P)
+                        flags = np.array([s.molecule[0].getFormula()==form for s in reactionModel.core.species])
+                        reactionModel.enlarge((network,spc),reactEdge=False,unimolecularReact=flags,
+                                          bimolecularReact=np.zeros((len(reactionModel.core.species),len(reactionModel.core.species))))
+                    
+                        flags = np.array([s.molecule[0].getFormula()==form for s in reactionModel.core.species])
+                        reactionModel.enlarge(reactEdge=True,unimolecularReact=flags,
+                                          bimolecularReact=np.zeros((len(reactionModel.core.species),len(reactionModel.core.species))))
+                        incomplete = True
+        
+        
+        #clean up output files
+        
+        path = os.path.join(reactionModel.pressureDependence.outputFile,'pdep')
+        for name in os.listdir(path):
+            if name.endswith('.py') and '_' in name:
+                if int(name.split('_')[-1].split('.')[0]) != len(network.isomers):
+                    os.remove(os.path.join(path,name))
+                else:
+                    os.rename(os.path.join(path,name),os.path.join(path,'network_full.py'))
+                    
+        
+        
         
         
         
